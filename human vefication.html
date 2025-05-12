@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<title>Human Verification: Eye Blink Detection</title>
+<style>
+  /* Reset and basics */
+  * {
+    box-sizing: border-box;
+  }
+  body, html {
+    margin: 0;
+    padding: 0;
+    font-family: 'Fira Mono', Consolas, 'Courier New', monospace, monospace;
+    height: 100vh;
+    overflow: hidden;
+    background-color: #000000;
+    color: #ffffff;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    user-select: none;
+  }
+  h1 {
+    margin: 0 0 10px 0;
+    font-weight: 700;
+    color: #ffffff;
+    text-shadow: 0 0 5px #8c8c8c;
+    font-size: 2.2rem;
+  }
+  #status {
+    font-size: 1.15em;
+    margin-bottom: 15px;
+    text-align: center;
+    min-height: 1.2em;
+    color: #ffffff;
+    text-shadow: 0 0 3px #6e6e6e;
+  }
+  #videoContainer {
+    position: relative;
+    width: 320px;
+    max-width: 90vw;
+    height: 240px;
+    border-radius: 15px;
+    overflow: hidden;
+    box-shadow:
+      0 0 20px #666666,
+      inset 0 0 40px #000000,
+      inset 0 0 10px #666666;
+    background-color: #000000;
+    user-select: none;
+    border: 2px solid #777777;
+  }
+  video {
+    width: 100%;
+    height: auto;
+    display: block;
+    background: #000000;
+    filter: contrast(1.1) brightness(0.9);
+  }
+  #overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 320px;
+    height: 240px;
+    pointer-events: none;
+  }
+  #result {
+    margin-top: 20px;
+    font-size: 1.4em;
+    font-weight: 700;
+    color: #ffffff;
+    height: 1.6em;
+    user-select: none;
+    text-align: center;
+    text-shadow: 0 0 6px #999999;
+  }
+  #instructions {
+    max-width: 320px;
+    font-size: 1em;
+    color: #eeeeee;
+    text-align: center;
+    margin-bottom: 10px;
+    letter-spacing: 0.04em;
+  }
+  #startButton {
+    margin-top: 14px;
+    padding: 12px 30px;
+    background: transparent;
+    border: 2px solid #888888;
+    border-radius: 30px;
+    font-size: 1rem;
+    color: #ffffff;
+    cursor: pointer;
+    font-weight: 700;
+    box-shadow:
+      0 0 8px #888888,
+      inset 0 0 10px #000000;
+    transition:
+      background-color 0.3s ease,
+      color 0.3s ease,
+      box-shadow 0.3s ease;
+  }
+  #startButton:hover {
+    background-color: #888888;
+    color: #000000;
+    box-shadow:
+      0 0 20px #bbbbbb,
+      inset 0 0 15px #bbbbbb;
+  }
+  @media (max-width: 400px) {
+    #videoContainer {
+      width: 280px;
+      height: 210px;
+      border: 1.5px solid #777777;
+    }
+    #overlay {
+      width: 280px;
+      height: 210px;
+    }
+    #instructions {
+      max-width: 280px;
+      font-size: 0.95em;
+    }
+    h1 {
+      font-size: 1.8rem;
+    }
+  }
+</style>
+</head>
+<body>
+<h1>Human Verification</h1>
+<div id="instructions">Click “Start Camera” and look into the camera. Blink naturally to verify you are human.</div>
+<div id="videoContainer">
+  <video id="video" autoplay muted playsinline></video>
+  <canvas id="overlay"></canvas>
+</div>
+<div>
+  <button id="startButton">Start Camera</button>
+</div>
+<div id="status">Models not loaded yet.</div>
+<div id="result"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
+<script>
+  const video = document.getElementById('video');
+  const overlay = document.getElementById('overlay');
+  const overlayCtx = overlay.getContext('2d');
+  const status = document.getElementById('status');
+  const result = document.getElementById('result');
+  const startButton = document.getElementById('startButton');
+
+  // Eye Aspect Ratio threshold and blink detection params
+  const EAR_THRESHOLD = 0.25; // Determines closed eye
+  const EAR_CONSEC_FRAMES = 2; // Number of consecutive frames below threshold to count a blink
+
+  // Variables for blink detection
+  let blinkCount = 0;
+  let consecFramesBelowThresh = 0;
+  let verified = false;
+
+  // Utility function to calculate Euclidean distance between two points
+  function euclideanDistance(p1, p2) {
+    return Math.hypot(p1.x - p2.x, p1.y - p2.y);
+  }
+
+  // Compute Eye Aspect Ratio (EAR) for one eye given landmarks in 2D points (6 points)
+  // EAR = (||p2-p6|| + ||p3-p5||) / (2 * ||p1-p4||)
+  function computeEAR(eye) {
+    const A = euclideanDistance(eye[1], eye[5]);
+    const B = euclideanDistance(eye[2], eye[4]);
+    const C = euclideanDistance(eye[0], eye[3]);
+    return (A + B) / (2.0 * C);
+  }
+
+  let modelsLoaded = false;
+
+  // Load face-api models
+  async function loadModels() {
+    // Updated model URL to GitHub raw for weights files
+    const MODEL_URL = 'https://raw.githubusercontent.com/justadudewhohacks/face-api.js/master/weights/';
+    status.textContent = 'Loading models...';
+    try {
+      await faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
+      await faceapi.nets.faceLandmark68TinyNet.loadFromUri(MODEL_URL);
+      status.textContent = 'Models loaded.';
+      modelsLoaded = true;
+      startButton.disabled = false;
+    } catch (e) {
+      status.textContent = 'Failed to load models: ' + e.message;
+      console.error(e);
+    }
+  }
+
+  // Setup camera stream
+  async function startVideo() {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, audio: false });
+      video.srcObject = stream;
+      await video.play();
+      status.textContent = 'Camera started. Please blink to verify...';
+    } catch (err) {
+      status.textContent = 'Cannot access camera: ' + err.message;
+      console.error('getUserMedia error:', err);
+    }
+  }
+
+  // Draw eye contour on canvas
+  function drawEye(eye) {
+    overlayCtx.beginPath();
+    overlayCtx.strokeStyle = '#888888';
+    overlayCtx.lineWidth = 2.5;
+    overlayCtx.shadowColor = '#777777';
+    overlayCtx.shadowBlur = 6;
+    overlayCtx.moveTo(eye[0].x, eye[0].y);
+    for(let i = 1; i < eye.length; i++) {
+      overlayCtx.lineTo(eye[i].x, eye[i].y);
+    }
+    overlayCtx.closePath();
+    overlayCtx.stroke();
+    overlayCtx.shadowBlur = 0;
+  }
+
+  // Main detection loop
+  async function onPlay() {
+    if (video.paused || video.ended || verified) {
+      return setTimeout(() => onPlay());
+    }
+
+    // Detect face with landmarks (tiny detector for performance)
+    const detection = await faceapi.detectSingleFace(video, new faceapi.TinyFaceDetectorOptions()).withFaceLandmarks(true);
+
+    overlay.width = video.videoWidth;
+    overlay.height = video.videoHeight;
+    overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
+
+    if (detection) {
+      const landmarks = detection.landmarks;
+
+      // Left eye points indices for 68-landmark model: 36 to 41
+      // Right eye points indices: 42 to 47
+      const leftEye = landmarks.getLeftEye();
+      const rightEye = landmarks.getRightEye();
+
+      // Draw eye contours
+      drawEye(leftEye);
+      drawEye(rightEye);
+
+      // Calculate EAR for both eyes
+      const leftEAR = computeEAR(leftEye);
+      const rightEAR = computeEAR(rightEye);
+      const ear = (leftEAR + rightEAR) / 2.0;
+
+      status.textContent = 'Please blink to verify...';
+
+      // Check if EAR below threshold (eye closed)
+      if (ear < EAR_THRESHOLD) {
+        consecFramesBelowThresh++;
+      } else {
+        if (consecFramesBelowThresh >= EAR_CONSEC_FRAMES) {
+          blinkCount++;
+          if (blinkCount >= 1) {
+            verified = true;
+            status.textContent = '';
+            result.textContent = '✔ Verification Passed - Human Detected! Redirecting...';
+            startButton.disabled = false;
+            // Redirect after short delay (2 seconds)
+            setTimeout(() => {
+              window.location.href = 'https://vivekdeok20.wixstudio.com/my-site-1';
+            }, 2000);
+          }
+        }
+        consecFramesBelowThresh = 0;
+      }
+    } else {
+      status.textContent = 'Face not detected. Please align your face in front of the camera.';
+    }
+
+    requestAnimationFrame(onPlay);
+  }
+
+  async function init() {
+    startButton.disabled = true;
+    await loadModels();
+  }
+
+  // Start button click handler to request camera access on user gesture
+  startButton.addEventListener('click', async () => {
+    if (!modelsLoaded) {
+      status.textContent = 'Models are not loaded yet. Please wait...';
+      return;
+    }
+    startButton.disabled = true;
+    result.textContent = '';
+    verified = false;
+    blinkCount = 0;
+    consecFramesBelowThresh = 0;
+    status.textContent = 'Starting camera...';
+    await startVideo();
+    onPlay();
+  });
+
+  init();
+</script>
+</body>
+</html>
